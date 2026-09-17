@@ -1,0 +1,14 @@
+{
+  "name": "gemini-web-proxy",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker 反代 Gemini 网页版，单域名 + 路径前缀分发",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

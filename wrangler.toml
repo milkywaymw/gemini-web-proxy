@@ -1,0 +1,10 @@
+name = "gemini-web-proxy"
+main = "src/index.js"
+compatibility_date = "2024-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+# 部署后访问: https://gemini-web-proxy.<你的子域>.workers.dev
+# 或者绑定自定义域名:
+# [routes]
+# pattern = "gemini.yourdomain.com/*"
+# custom_domain = true
