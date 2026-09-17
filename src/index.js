@@ -1,25 +1,7 @@
-/**
- * gemini-web-proxy — Cloudflare Worker
- *
- * 反代 Gemini 网页版，单域名 + 路径前缀分发到 Google 各子域名。
- * 用 HTMLRewriter 改写页面里的绝对 URL → 本域路径。
- *
- * 路径映射:
- *   /                → gemini.google.com
- *   /accounts/       → accounts.google.com
- *   /content-push/   → content-push.googleapis.com
- *   /lh3/            → lh3.googleusercontent.com
- *   /ssl-gstatic/    → ssl.gstatic.com
- *   /www-gstatic/    → www.gstatic.com
- *   /fonts-api/      → fonts.googleapis.com
- *   /fonts-gstatic/  → fonts.gstatic.com
- *   /clients6/       → clients6.google.com
- *   /play/           → play.google.com
- *   /apis/           → apis.google.com
- *   /www-google/     → www.google.com
- */
+import http from 'node:http';
+import https from 'node:https';
 
-// ── 路径 → 子域名映射表（顺序：长前缀优先）──────────────────
+// ── 路径 → 子域名映射表（长前缀优先）──────────────────────
 const HOST_MAP = [
   ['/accounts/',       'accounts.google.com'],
   ['/content-push/',   'content-push.googleapis.com'],
@@ -35,8 +17,7 @@ const HOST_MAP = [
   ['/',                'gemini.google.com'],
 ];
 
-// ── URL 改写规则（用于 HTMLRewriter）────────────────────────
-// 源域名 → 本域路径前缀
+// ── URL 改写规则 ──────────────────────────────────────────
 const REWRITE_RULES = [
   ['https://gemini.google.com',             ''],
   ['https://accounts.google.com',           '/accounts'],
@@ -52,27 +33,19 @@ const REWRITE_RULES = [
   ['https://www.google.com',                '/www-google'],
 ];
 
-// 构建 origin → 本域前缀的快速查找
-const ORIGIN_MAP = new Map(REWRITE_RULES);
-
-// ── 解析请求路径，找到目标 host 和去掉前缀后的 path ──────────
-function resolveTarget(url) {
-  const u = new URL(url);
+// ── 解析请求路径 ──────────────────────────────────────────
+function resolveTarget(urlPath) {
   for (const [prefix, host] of HOST_MAP) {
-    if (u.pathname.startsWith(prefix)) {
-      const stripped = u.pathname.slice(prefix.length - 1);
+    if (urlPath.startsWith(prefix)) {
+      const stripped = urlPath.slice(prefix.length - 1);
       const targetPath = stripped.startsWith('/') ? stripped : '/' + stripped;
-      return {
-        host,
-        pathname: targetPath + u.search,
-        prefix,
-      };
+      return { host, pathname: targetPath, prefix };
     }
   }
   return null;
 }
 
-// ── 改写响应体中的 URL（对 text/html 和 JS）──────────────────
+// ── 改写响应体 ────────────────────────────────────────────
 function rewriteBody(text, myOrigin) {
   let result = text;
   for (const [origin, prefix] of REWRITE_RULES) {
@@ -85,10 +58,10 @@ function rewriteBody(text, myOrigin) {
   return result;
 }
 
-// ── 改写 Location / Set-Cookie 等响应头 ──────────────────────
-function rewriteHeaders(headerValue, myOrigin) {
-  if (!headerValue) return headerValue;
-  let result = headerValue;
+// ── 改写响应头 ────────────────────────────────────────────
+function rewriteHeaderValue(value, myOrigin) {
+  if (!value) return value;
+  let result = value;
   for (const [origin, prefix] of REWRITE_RULES) {
     if (origin === 'https://gemini.google.com') {
       result = result.split(origin).join(myOrigin);
@@ -99,97 +72,127 @@ function rewriteHeaders(headerValue, myOrigin) {
   return result;
 }
 
-// ── 改写 Set-Cookie 的 domain/path ───────────────────────────
-function rewriteSetCookie(cookieStr, targetHost, myOrigin) {
-  let result = cookieStr;
-  for (const [origin, prefix] of REWRITE_RULES) {
-    if (origin === 'https://gemini.google.com') {
-      result = result.split(origin).join(myOrigin);
-    } else {
-      result = result.split(origin).join(myOrigin + prefix);
-    }
-  }
-  result = result.replace(/domain=[^;]+/gi, `domain=${new URL(myOrigin).hostname}`);
+function rewriteSetCookie(cookieStr, myOrigin) {
+  let result = rewriteHeaderValue(cookieStr, myOrigin);
+  const myHost = new URL(myOrigin).hostname;
+  result = result.replace(/domain=[^;]+/gi, `domain=${myHost}`);
   return result;
 }
 
-// ── Worker 入口 ──────────────────────────────────────────────
-export default {
-  async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    const myOrigin = `${url.protocol}//${url.host}`;
+// ── 收集请求体 ────────────────────────────────────────────
+function collectBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
 
-    const target = resolveTarget(request.url);
-    if (!target) {
-      return new Response('Bad gateway: no route matched', { status: 502 });
-    }
+// ── 代理请求 ──────────────────────────────────────────────
+function proxyRequest(req, res, myOrigin) {
+  const target = resolveTarget(req.url);
+  if (!target) {
+    res.writeHead(502, { 'Content-Type': 'text/plain' });
+    res.end('Bad gateway: no route matched');
+    return;
+  }
 
-    // 构建上游请求
-    const upstreamUrl = `https://${target.host}${target.pathname}`;
-    const upstreamReq = new Request(upstreamUrl, request);
+  const upstreamPath = target.pathname + (req.url.includes('?') ? '?' + req.url.split('?')[1] : '');
+  const options = {
+    hostname: target.host,
+    port: 443,
+    path: upstreamPath,
+    method: req.method,
+    headers: {
+      ...req.headers,
+      Host: target.host,
+      Referer: `https://${target.host}/`,
+    },
+  };
 
-    // 改写请求头
-    upstreamReq.headers.set('Host', target.host);
-    upstreamReq.headers.delete('cf-connecting-ip');
-    upstreamReq.headers.delete('cf-ipcountry');
-  upstreamReq.headers.delete('cf-ray');
-  upstreamReq.headers.delete('cf-visitor');
-  upstreamReq.headers.set('Referer', `https://${target.host}/`);
+  delete options.headers['host'];
+  delete options.headers['cf-connecting-ip'];
+  delete options.headers['cf-ipcountry'];
+  delete options.headers['cf-ray'];
+  delete options.headers['cf-visitor'];
+  delete options.headers['x-forwarded-for'];
+  delete options.headers['x-forwarded-proto'];
+  delete options.headers['x-forwarded-port'];
+  delete options.headers['x-request-start'];
+  delete options.headers['x-render-proxy'];
+  delete options.headers['via'];
 
-    // 发请求
-    let upstreamRes;
-    try {
-      upstreamRes = await fetch(upstreamReq);
-    } catch (err) {
-      return new Response(`Upstream error: ${err.message}`, { status: 502 });
-    }
-
-    // 克隆响应以便修改头
-    const res = new Response(upstreamRes.body, {
-      status: upstreamRes.status,
-      statusText: upstreamRes.statusText,
-      headers: new Headers(upstreamRes.headers),
-    });
-
-    // 改写 Location 头（重定向）
-    const location = res.headers.get('Location');
-    if (location) {
-      res.headers.set('Location', rewriteHeaders(location, myOrigin));
-    }
-
-    // 改写 Set-Cookie
-    const setCookies = res.headers.getAll?.('Set-Cookie') || [res.headers.get('Set-Cookie')].filter(Boolean);
-    if (setCookies.length > 0) {
-      res.headers.delete('Set-Cookie');
-      for (const cookie of setCookies) {
-        res.headers.append('Set-Cookie', rewriteSetCookie(cookie, target.host, myOrigin));
-      }
-    }
-
-    // 改写 Access-Control-Allow-Origin
-    const aco = res.headers.get('Access-Control-Allow-Origin');
-    if (aco && aco !== '*') {
-      res.headers.set('Access-Control-Allow-Origin', myOrigin);
-    }
-
-    // 对 HTML / JS / JSON 做 URL 替换
-    const contentType = res.headers.get('Content-Type') || '';
+  const proxyReq = https.request(options, (proxyRes) => {
+    const contentType = (proxyRes.headers['content-type'] || '').toLowerCase();
     const isRewritable =
       contentType.includes('text/html') ||
       contentType.includes('javascript') ||
       contentType.includes('application/json') ||
       contentType.includes('text/css');
 
-    if (isRewritable) {
-      const body = await res.text();
-      const rewritten = rewriteBody(body, myOrigin);
-      return new Response(rewritten, {
-        status: res.status,
-        statusText: res.statusText,
-        headers: res.headers,
-      });
+    // 改写响应头
+    const headers = { ...proxyRes.headers };
+
+    if (headers['location']) {
+      headers['location'] = rewriteHeaderValue(headers['location'], myOrigin);
     }
 
-    return res;
-  },
-};
+    if (headers['set-cookie']) {
+      headers['set-cookie'] = headers['set-cookie'].map((c) => rewriteSetCookie(c, myOrigin));
+    }
+
+    if (headers['access-control-allow-origin'] && headers['access-control-allow-origin'] !== '*') {
+      headers['access-control-allow-origin'] = myOrigin;
+    }
+
+    // resumable upload: content-push 不缓冲，直接透传
+    if (target.host === 'content-push.googleapis.com' || !isRewritable) {
+      res.writeHead(proxyRes.statusCode, headers);
+      proxyRes.pipe(res);
+      return;
+    }
+
+    // 可改写的: 收完再替换
+    const chunks = [];
+    proxyRes.on('data', (c) => chunks.push(c));
+    proxyRes.on('end', () => {
+      const body = Buffer.concat(chunks).toString('utf-8');
+      const rewritten = rewriteBody(body, myOrigin);
+      headers['content-length'] = Buffer.byteLength(rewritten).toString();
+      res.writeHead(proxyRes.statusCode, headers);
+      res.end(rewritten);
+    });
+    proxyRes.on('error', () => {
+      if (!res.headersSent) {
+        res.writeHead(502);
+        res.end('Upstream stream error');
+      }
+    });
+  });
+
+  proxyReq.on('error', (err) => {
+    if (!res.headersSent) {
+      res.writeHead(502, { 'Content-Type': 'text/plain' });
+      res.end(`Upstream error: ${err.message}`);
+    }
+  });
+
+  if (req.method === 'GET' || req.method === 'HEAD') {
+    proxyReq.end();
+  } else {
+    req.pipe(proxyReq);
+  }
+}
+
+// ── 启动 HTTP 服务 ────────────────────────────────────────
+const PORT = process.env.PORT || 10000;
+
+const server = http.createServer((req, res) => {
+  const myOrigin = `https://${req.headers.host}`;
+  proxyRequest(req, res, myOrigin);
+});
+
+server.listen(PORT, () => {
+  console.log(`gemini-web-proxy listening on :${PORT}`);
+});

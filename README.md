@@ -1,41 +1,33 @@
 # gemini-web-proxy
 
-Cloudflare Worker 反代 Gemini 网页版。单域名 + 路径前缀分发到 Google 各子域名，用 `rewriteBody` 改写页面里的绝对 URL。
+Render Node.js 反代 Gemini 网页版。单域名 + 路径前缀分发到 Google 各子域名，响应体 URL 自动改写。
 
-## 部署
+## 部署到 Render
 
-```bash
-# 1. 安装 wrangler
-npm install
+### 方式一：Blueprint（推荐）
 
-# 2. 登录 Cloudflare
-npx wrangler login
+1. 把项目推到 GitHub
+2. Render Dashboard → New → Blueprint
+3. 选择仓库，Render 自动读 `render.yaml`
+4. 部署完成，访问 `https://gemini-web-proxy.onrender.com`
 
-# 3. 部署
-npm run deploy
-```
+### 方式二：手动
 
-部署后访问 `https://gemini-web-proxy.<你的子域>.workers.dev` 即可打开 Gemini 网页版。
-
-## 自定义域名
-
-在 `wrangler.toml` 里取消注释：
-
-```toml
-[routes]
-pattern = "gemini.yourdomain.com/*"
-custom_domain = true
-```
-
-或直接在 Cloudflare Dashboard → Workers → 你的 Worker → Settings → Triggers 里加自定义域名。
+1. Render Dashboard → New → Web Service
+2. 连接 GitHub 仓库
+3. 填写：
+   - **Runtime**: Node
+   - **Build**: `npm install`
+   - **Start**: `node src/index.js`
+   - **Plan**: Free
+4. 部署
 
 ## 本地调试
 
 ```bash
-npm run dev
+node src/index.js
+# 访问 http://localhost:10000
 ```
-
-然后访问 `http://localhost:8787`。
 
 ## 原理
 
@@ -58,10 +50,10 @@ npm run dev
 
 ## 已知限制
 
-- CF Worker 免费版有 CPU 时间限制（10ms/请求），大页面可能超时
-- Worker 不缓冲完整请求体，resumable upload（附件上传）可能不完全兼容
-- Google 的 CSP 策略可能阻断部分子资源，需要浏览器控制台排查
-- 登录后 cookie 绑定到你的 Worker 域名，不是 google.com
+- Render 免费版 15 分钟无请求会休眠，下次访问冷启动约 30-50 秒
+- 不支持 Docker（纯 Node.js 源码部署）
+- Google 的 CSP 策略可能阻断部分子资源
+- 登录后 cookie 绑定到 Render 域名
 
 ## License
 
