@@ -4,7 +4,7 @@
   "description": "Render Node.js 反代 Gemini 网页版，单域名 + 路径前缀分发",
   "type": "module",
   "scripts": {
-    "start": "node src/index.js",
+    "start": "node --max-http-header-size=65536 src/index.js",
     "dev": "node src/index.js"
   },
   "engines": {

@@ -188,7 +188,9 @@ function proxyRequest(req, res, myOrigin) {
 // ── 启动 HTTP 服务 ────────────────────────────────────────
 const PORT = process.env.PORT || 10000;
 
-const server = http.createServer((req, res) => {
+const server = http.createServer({
+  maxHeaderSize: 65536,
+}, (req, res) => {
   const myOrigin = `https://${req.headers.host}`;
   proxyRequest(req, res, myOrigin);
 });
