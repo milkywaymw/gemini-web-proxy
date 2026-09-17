@@ -104,6 +104,7 @@ function proxyRequest(req, res, myOrigin) {
     port: 443,
     path: upstreamPath,
     method: req.method,
+    maxHeaderSize: 65536,
     headers: {
       ...req.headers,
       Host: target.host,
