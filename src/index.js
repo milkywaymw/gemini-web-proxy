@@ -113,6 +113,7 @@ function proxyRequest(req, res, myOrigin) {
   };
 
   delete options.headers['host'];
+  delete options.headers['accept-encoding'];
   delete options.headers['cf-connecting-ip'];
   delete options.headers['cf-ipcountry'];
   delete options.headers['cf-ray'];
@@ -160,6 +161,7 @@ function proxyRequest(req, res, myOrigin) {
     proxyRes.on('end', () => {
       const body = Buffer.concat(chunks).toString('utf-8');
       const rewritten = rewriteBody(body, myOrigin);
+      delete headers['content-encoding'];
       headers['content-length'] = Buffer.byteLength(rewritten).toString();
       res.writeHead(proxyRes.statusCode, headers);
       res.end(rewritten);
